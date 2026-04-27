@@ -1,0 +1,39 @@
+<h2>Dashboard</h2>
+
+<p>Welcome {{ request.user.username }}</p>
+
+<br>
+
+<a href="/search/">Search Ads</a>
+
+<br><br>
+
+<a href="/logout/">Logout</a>
+
+<h2>Reported Ads</h2>
+
+{% for ad in ads %}
+
+<div style="border:1px solid #ccc; padding:15px; margin-bottom:20px">
+
+<h3>{{ ad.title }}</h3>
+
+<p>{{ ad.body }}</p>
+
+<img src="{{ ad.image_url }}" width="400">
+
+<br><br>
+
+<a href="{{ ad.link_url }}" target="_blank">Visit Link</a>
+
+<br><br>
+
+{% if ad.reviewed %}
+Reviewed
+{% else %}
+Pending Review
+{% endif %}
+
+</div>
+
+{% endfor %}

@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Ad Search</title>
+</head>
+<body>
+
+<a href="{% url 'dashboard' %}">Go to Dashboard</a>
+<br><br>
+
+<h2>Search Ads</h2>
+
+<form method="POST">
+    {% csrf_token %}
+    <input type="text" name="keyword" value="{{ keyword }}" placeholder="Enter keyword">
+    <button type="submit">Search</button>
+</form>
+
+<hr>
+
+{% if results %}
+    <h3>Results</h3>
+
+    {% for ad in results %}
+
+        {% with card=ad.snapshot.cards.0 %}
+
+        {% if card %}
+        <div style="border:1px solid #ccc; padding:15px; margin-bottom:20px; width:500px">
+
+            <h3>{{ card.title }}</h3>
+
+            <p>{{ card.body }}</p>
+
+            {% if card.resized_image_url %}
+                <img src="{{ card.resized_image_url }}" width="400">
+            {% endif %}
+
+            <br><br>
+
+            {% if card.link_url %}
+                <a href="{{ card.link_url }}" target="_blank">Visit Link</a>
+            {% endif %}
+
+            <button
+            class="report-btn"
+            data-title="{{ card.title }}"
+            data-body="{{ card.body }}"
+            data-link="{{ card.link_url }}"
+            data-image="{{ card.resized_image_url }}"
+            >
+            Report
+            </button>
+
+        </div>
+        {% endif %}
+
+        {% endwith %}
+
+    {% endfor %}
+
+{% endif %}
+
+{% if next_cursor %}
+<form method="POST">
+    {% csrf_token %}
+    <input type="hidden" name="keyword" value="{{ keyword }}">
+    <input type="hidden" name="cursor" value="{{ next_cursor }}">
+    <button type="submit">Load More</button>
+</form>
+{% endif %}
+
+</body>
+</html>
+
+<script>
+
+function getCookie(name) {
+    let cookieValue = null;
+
+    if (document.cookie && document.cookie !== '') {
+
+        const cookies = document.cookie.split(';');
+
+        for (let i = 0; i < cookies.length; i++) {
+
+            const cookie = cookies[i].trim();
+
+            if (cookie.substring(0, name.length + 1) === (name + '=')) {
+
+                cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                break;
+
+            }
+        }
+    }
+    return cookieValue;
+}
+
+const csrftoken = getCookie('csrftoken');
+
+
+document.querySelectorAll(".report-btn").forEach(button => {
+
+    button.addEventListener("click", function() {
+
+        const title = this.dataset.title
+        const body = this.dataset.body
+        const link = this.dataset.link
+        const image = this.dataset.image
+
+        fetch("{% url 'report_ad' %}", {
+
+            method: "POST",
+
+            headers: {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "X-CSRFToken": csrftoken
+            },
+
+            body: new URLSearchParams({
+                title: title,
+                body: body,
+                link_url: link,
+                image_url: image
+            })
+
+        })
+
+        .then(response => response.json())
+        .then(data => {
+
+            if(data.status === "success"){
+
+                button.innerText = "Reported ✓"
+                button.disabled = true
+
+            }
+
+        })
+
+    })
+
+})
+
+</script>
