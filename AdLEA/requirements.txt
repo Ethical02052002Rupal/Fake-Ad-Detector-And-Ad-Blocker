@@ -1,3 +1,5 @@
 django>=5.1.0
 requests
 python-dotenv
+dj-database-url
+psycopg[binary]
