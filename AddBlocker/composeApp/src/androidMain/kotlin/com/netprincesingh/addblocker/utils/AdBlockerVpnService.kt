@@ -7,8 +7,13 @@ import android.util.Log
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 
@@ -16,7 +21,8 @@ class AdBlockerVpnService : VpnService() {
 
     private val TAG = "AdBlockerVpnService"
     private var vpnInterface: ParcelFileDescriptor? = null
-    private val scope = CoroutineScope(Executors.newSingleThreadExecutor().asCoroutineDispatcher())
+    private val scope = CoroutineScope(Executors.newFixedThreadPool(4).asCoroutineDispatcher())
+    private val writeMutex = Mutex()
 
     companion object {
         private const val MAX_LOG_LINES = 100
@@ -71,19 +77,12 @@ class AdBlockerVpnService : VpnService() {
         log("Starting VPN...")
         val builder = Builder()
 
-        // Configure the VPN tunnel
+        // Configure the VPN tunnel for DNS Proxy mode
         builder.setSession("AddBlockerVpn")
             .addAddress("10.0.0.2", 32) // Local IP for the VPN interface
-            .addRoute("0.0.0.0", 0)     // Route all traffic through the VPN
-            .addDnsServer("8.8.8.8")    // Example DNS server
+            .addRoute("10.0.0.3", 32)   // ONLY route traffic going to our dummy DNS server!
+            .addDnsServer("10.0.0.3")   // Tell Android to use our dummy DNS server
             .setMtu(1500)
-
-        // Protect the socket from being routed through the VPN itself
-        // This is crucial to prevent a routing loop
-        // if (!protect(someSocket)) {
-        //     log("Failed to protect socket.")
-        //     return
-        // }
 
         vpnInterface = builder.establish()
 
@@ -95,7 +94,7 @@ class AdBlockerVpnService : VpnService() {
         log("VPN established successfully.")
         _isVpnRunning.value = true
 
-        // Start reading and writing to the VPN interface in a coroutine
+        // Start reading from the VPN interface in a coroutine
         scope.launch {
             runVpnTunnel()
         }
@@ -113,7 +112,6 @@ class AdBlockerVpnService : VpnService() {
 
     private suspend fun runVpnTunnel() {
         val input = FileInputStream(vpnInterface!!.fileDescriptor)
-        val output = FileOutputStream(vpnInterface!!.fileDescriptor)
         val buffer = ByteBuffer.allocate(32767) // Max IP packet size
 
         while (scope.isActive) {
@@ -129,39 +127,36 @@ class AdBlockerVpnService : VpnService() {
                     
                     if (version == 4 && length >= 20) {
                         val protocolNum = bytes[9].toInt() and 0xFF
-                        val protocol = when (protocolNum) {
-                            1 -> "ICMP"
-                            6 -> "TCP"
-                            17 -> "UDP"
-                            else -> "Other($protocolNum)"
-                        }
                         
-                        val srcIp = "${bytes[12].toUByte()}.${bytes[13].toUByte()}.${bytes[14].toUByte()}.${bytes[15].toUByte()}"
-                        val destIp = "${bytes[16].toUByte()}.${bytes[17].toUByte()}.${bytes[18].toUByte()}.${bytes[19].toUByte()}"
-                        
-                        log("[$protocol] $srcIp -> $destIp ($length bytes)")
-
-                        if (protocolNum == 17) { // UDP
+                        // We are only routing 10.0.0.3 (DNS). Expect UDP (17).
+                        if (protocolNum == 17) {
                             val ihl = (versionAndIHL and 0x0F) * 4
                             if (length > ihl + 8) {
+                                val srcPort = ((bytes[ihl].toInt() and 0xFF) shl 8) or (bytes[ihl + 1].toInt() and 0xFF)
                                 val destPort = ((bytes[ihl + 2].toInt() and 0xFF) shl 8) or (bytes[ihl + 3].toInt() and 0xFF)
+                                
                                 if (destPort == 53) {
                                     val domain = extractDomainFromDns(bytes, ihl + 20, length)
                                     if (domain != null) {
                                         logDns(domain)
+                                        log("[DNS Query] $domain")
+                                    }
+                                    
+                                    val dnsPayloadLength = length - ihl - 8
+                                    val dnsPayload = ByteArray(dnsPayloadLength)
+                                    System.arraycopy(bytes, ihl + 8, dnsPayload, 0, dnsPayloadLength)
+                                    
+                                    // Make a copy of the packet to use for the response
+                                    val originalPacket = bytes.copyOf(length)
+                                    
+                                    // Proxy the request asynchronously so we don't block the read loop
+                                    scope.launch(Dispatchers.IO) {
+                                        proxyDnsRequest(originalPacket, ihl, srcPort, dnsPayload)
                                     }
                                 }
                             }
                         }
-                    } else if (version == 6) {
-                        log("[IPv6] packet ($length bytes)")
-                    } else {
-                        log("[Unknown IPv$version] packet ($length bytes)")
                     }
-
-                    // Example: Simply forward all traffic for now (no blocking)
-                    // In a real ad blocker, you would conditionally write to output.
-                    output.write(buffer.array(), 0, length)
                     buffer.clear()
                 }
             } catch (e: Exception) {
@@ -170,6 +165,107 @@ class AdBlockerVpnService : VpnService() {
                 break
             }
         }
+    }
+
+    private suspend fun proxyDnsRequest(originalPacket: ByteArray, ihl: Int, originalSrcPort: Int, dnsPayload: ByteArray) {
+        var socket: DatagramSocket? = null
+        try {
+            socket = DatagramSocket()
+            // CRITICAL: Protect the socket from being routed back into the VPN!
+            // (Even though we don't route 8.8.8.8, it's good practice)
+            protect(socket)
+            
+            val realDnsIp = InetAddress.getByName("8.8.8.8")
+            val sendPacket = DatagramPacket(dnsPayload, dnsPayload.size, realDnsIp, 53)
+            socket.soTimeout = 3000
+            socket.send(sendPacket)
+
+            val recvBuffer = ByteArray(2048)
+            val recvPacket = DatagramPacket(recvBuffer, recvBuffer.size)
+            socket.receive(recvPacket)
+
+            val responsePayload = recvPacket.data.copyOf(recvPacket.length)
+            
+            // Reconstruct the raw IP and UDP packet
+            val responseIpPacket = buildIpUdpPacket(originalPacket, ihl, originalSrcPort, responsePayload)
+            
+            // Write it back to the VPN interface securely
+            writeMutex.withLock {
+                if (vpnInterface != null) {
+                    val output = FileOutputStream(vpnInterface!!.fileDescriptor)
+                    output.write(responseIpPacket)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "DNS proxy error", e)
+        } finally {
+            socket?.close()
+        }
+    }
+
+    private fun buildIpUdpPacket(original: ByteArray, ihl: Int, originalSrcPort: Int, payload: ByteArray): ByteArray {
+        val totalLength = ihl + 8 + payload.size
+        val packet = ByteArray(totalLength)
+        
+        // Copy original IP header
+        System.arraycopy(original, 0, packet, 0, ihl)
+        
+        // Swap Source and Destination IPs
+        for (i in 0..3) {
+            packet[12 + i] = original[16 + i]
+            packet[16 + i] = original[12 + i]
+        }
+        
+        // Update IP Total Length
+        packet[2] = (totalLength shr 8).toByte()
+        packet[3] = totalLength.toByte()
+        
+        // Recalculate IP Checksum
+        packet[10] = 0
+        packet[11] = 0
+        val ipChecksum = calculateChecksum(packet, 0, ihl)
+        packet[10] = (ipChecksum shr 8).toByte()
+        packet[11] = ipChecksum.toByte()
+        
+        // Build UDP Header
+        val udpOffset = ihl
+        // Source Port becomes 53 (DNS)
+        packet[udpOffset] = 0
+        packet[udpOffset + 1] = 53
+        // Destination Port becomes originalSrcPort
+        packet[udpOffset + 2] = (originalSrcPort shr 8).toByte()
+        packet[udpOffset + 3] = originalSrcPort.toByte()
+        
+        // UDP Length
+        val udpLength = 8 + payload.size
+        packet[udpOffset + 4] = (udpLength shr 8).toByte()
+        packet[udpOffset + 5] = udpLength.toByte()
+        
+        // UDP Checksum = 0 (No checksum calculated for IPv4 UDP responses to save computation)
+        packet[udpOffset + 6] = 0
+        packet[udpOffset + 7] = 0
+        
+        // Append Payload
+        System.arraycopy(payload, 0, packet, udpOffset + 8, payload.size)
+        
+        return packet
+    }
+
+    private fun calculateChecksum(data: ByteArray, offset: Int, length: Int): Int {
+        var sum = 0
+        var i = offset
+        while (i < offset + length - 1) {
+            val word = ((data[i].toInt() and 0xFF) shl 8) or (data[i + 1].toInt() and 0xFF)
+            sum += word
+            i += 2
+        }
+        if (i < offset + length) {
+            sum += (data[i].toInt() and 0xFF) shl 8
+        }
+        while ((sum shr 16) > 0) {
+            sum = (sum and 0xFFFF) + (sum shr 16)
+        }
+        return sum.inv() and 0xFFFF
     }
 
     override fun onDestroy() {

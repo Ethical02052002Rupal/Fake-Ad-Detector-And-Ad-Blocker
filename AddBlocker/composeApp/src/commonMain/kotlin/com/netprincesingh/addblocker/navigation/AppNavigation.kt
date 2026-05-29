@@ -35,7 +35,6 @@ fun DrawerContent(
 ) {
     val items = listOf(
         Triple("Home", Screen.Home.route, Icons.Default.Home),
-        Triple("Domains", Screen.Domains.route, Icons.Default.List),
         Triple("Profile", Screen.Profile.route, Icons.Default.Person),
     )
 
