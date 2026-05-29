@@ -3,6 +3,7 @@ package com.netprincesingh.addblocker.navigation
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
@@ -15,12 +16,14 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.netprincesingh.addblocker.ui.domain.DomainNameScreen
 import com.netprincesingh.addblocker.ui.home.HomeScreen
 import com.netprincesingh.addblocker.ui.profile.ProfileScreen
 import kotlinx.coroutines.launch
 
 sealed class Screen(val route: String) {
     object Home : Screen("home")
+    object Domains : Screen("domains")
     object Profile : Screen("profile")
 }
 
@@ -32,6 +35,7 @@ fun DrawerContent(
 ) {
     val items = listOf(
         Triple("Home", Screen.Home.route, Icons.Default.Home),
+        Triple("Domains", Screen.Domains.route, Icons.Default.List),
         Triple("Profile", Screen.Profile.route, Icons.Default.Person),
     )
 
@@ -105,7 +109,13 @@ fun AppNavigation() {
         Scaffold(
             topBar = {
                 TopAppBar(
-                    title = { Text(if (currentRoute == Screen.Profile.route) "Profile" else "Home") },
+                    title = {
+                        Text(when (currentRoute) {
+                            Screen.Profile.route -> "Profile"
+                            Screen.Domains.route -> "Domains"
+                            else -> "Home"
+                        })
+                    },
                     navigationIcon = {
                         IconButton(onClick = { scope.launch { drawerState.open() } }) {
                             Icon(Icons.Default.Menu, contentDescription = "Menu")
@@ -120,6 +130,7 @@ fun AppNavigation() {
                     startDestination = Screen.Home.route
                 ) {
                     composable(Screen.Home.route) { HomeScreen() }
+                    composable(Screen.Domains.route) { DomainNameScreen() }
                     composable(Screen.Profile.route) { ProfileScreen() }
                 }
             }

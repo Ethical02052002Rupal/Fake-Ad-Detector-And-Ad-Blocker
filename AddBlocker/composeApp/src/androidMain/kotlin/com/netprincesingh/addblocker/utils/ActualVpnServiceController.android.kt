@@ -16,6 +16,8 @@ import kotlinx.coroutines.flow.StateFlow
 class AndroidVpnServiceController(private val context: Context) : VpnServiceController {
 
     override val logs: StateFlow<List<String>> = AdBlockerVpnService.logs
+    override val dnsLogs: StateFlow<List<String>> = AdBlockerVpnService.dnsLogs
+    override val isVpnRunning: StateFlow<Boolean> = AdBlockerVpnService.isVpnRunning
 
     // This will hold the ActivityResultLauncher to be set by the composable context
     private var permissionLauncher: ActivityResultLauncher<Intent>? = null

@@ -23,6 +23,12 @@ class AdBlockerVpnService : VpnService() {
         private val _logs = MutableStateFlow<List<String>>(emptyList())
         val logs: StateFlow<List<String>> = _logs
 
+        private val _dnsLogs = MutableStateFlow<List<String>>(emptyList())
+        val dnsLogs: StateFlow<List<String>> = _dnsLogs
+
+        private val _isVpnRunning = MutableStateFlow(false)
+        val isVpnRunning: StateFlow<Boolean> = _isVpnRunning
+
         fun log(message: String) {
             Log.d("AdBlockerVpnService", message) // Always log to Logcat for debugging
             val currentLogs = _logs.value
@@ -32,6 +38,16 @@ class AdBlockerVpnService : VpnService() {
                 currentLogs + message
             }
             _logs.value = newLogs
+        }
+
+        fun logDns(domain: String) {
+            val currentLogs = _dnsLogs.value
+            val newLogs = if (currentLogs.size >= MAX_LOG_LINES) {
+                currentLogs.drop(1) + domain
+            } else {
+                currentLogs + domain
+            }
+            _dnsLogs.value = newLogs
         }
     }
 
@@ -77,6 +93,7 @@ class AdBlockerVpnService : VpnService() {
         }
 
         log("VPN established successfully.")
+        _isVpnRunning.value = true
 
         // Start reading and writing to the VPN interface in a coroutine
         scope.launch {
@@ -89,6 +106,7 @@ class AdBlockerVpnService : VpnService() {
         scope.cancel() // Cancel the coroutine scope
         vpnInterface?.close()
         vpnInterface = null
+        _isVpnRunning.value = false
         stopSelf()
         log("VPN stopped.")
     }
@@ -122,6 +140,19 @@ class AdBlockerVpnService : VpnService() {
                         val destIp = "${bytes[16].toUByte()}.${bytes[17].toUByte()}.${bytes[18].toUByte()}.${bytes[19].toUByte()}"
                         
                         log("[$protocol] $srcIp -> $destIp ($length bytes)")
+
+                        if (protocolNum == 17) { // UDP
+                            val ihl = (versionAndIHL and 0x0F) * 4
+                            if (length > ihl + 8) {
+                                val destPort = ((bytes[ihl + 2].toInt() and 0xFF) shl 8) or (bytes[ihl + 3].toInt() and 0xFF)
+                                if (destPort == 53) {
+                                    val domain = extractDomainFromDns(bytes, ihl + 20, length)
+                                    if (domain != null) {
+                                        logDns(domain)
+                                    }
+                                }
+                            }
+                        }
                     } else if (version == 6) {
                         log("[IPv6] packet ($length bytes)")
                     } else {
@@ -144,5 +175,28 @@ class AdBlockerVpnService : VpnService() {
     override fun onDestroy() {
         super.onDestroy()
         stopVpn()
+    }
+
+    private fun extractDomainFromDns(bytes: ByteArray, offset: Int, length: Int): String? {
+        try {
+            var i = offset
+            val sb = StringBuilder()
+            while (i < length) {
+                val len = bytes[i].toInt() and 0xFF
+                if (len == 0) break
+                if ((len and 0xC0) == 0xC0) break // pointer
+                if (sb.isNotEmpty()) sb.append(".")
+                i++
+                for (j in 0 until len) {
+                    if (i < length) {
+                        sb.append(bytes[i].toInt().toChar())
+                        i++
+                    }
+                }
+            }
+            return if (sb.isNotEmpty()) sb.toString() else null
+        } catch (e: Exception) {
+            return null
+        }
     }
 }
